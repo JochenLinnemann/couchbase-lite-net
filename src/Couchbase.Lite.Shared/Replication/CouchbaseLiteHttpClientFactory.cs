@@ -139,33 +139,35 @@ namespace Couchbase.Lite.Support
         /// <summary>
         /// Build a pipeline of HttpMessageHandlers.
         /// </summary>
+#if __ANDROID__
+        internal HttpMessageHandler BuildHandlerPipeline(CookieStore store, IRetryStrategy retryStrategy, bool allowSelfSigned)
+#else
         internal HttpMessageHandler BuildHandlerPipeline (CookieStore store, IRetryStrategy retryStrategy)
+#endif
         {
-            #if __MOBILE__
+#if __MOBILE__
             var handler = default(HttpClientHandler);
-            #if __ANDROID__
+#if __ANDROID__
             if (global::Android.OS.Build.VERSION.SdkInt >= global::Android.OS.BuildVersionCodes.Lollipop) {
-                handler = new Xamarin.Android.Net.AndroidClientHandler
+                handler = new CouchbaseAndroidClientHandler
                 {
-                    CookieContainer = store,
-                    UseCookies = true
+                    AllowSelfSigned = allowSelfSigned,
+                    UseCookies = false
                 };
             } else
-            #endif
+#endif
             {
                 handler = new HttpClientHandler
                 {
-                    CookieContainer = store,
-                    UseCookies = true
+                    UseCookies = false,
                 };
             }
-            #else
+#else
             var handler = new WebRequestHandler {
-                CookieContainer = store,
-                UseCookies = true,
+                UseCookies = false,
                 ReadWriteTimeout = (int)SocketTimeout.TotalMilliseconds
             };
-            #endif
+#endif
 
             if(handler.SupportsAutomaticDecompression) {
                 handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate;
@@ -180,9 +182,17 @@ namespace Couchbase.Lite.Support
             return retryHandler;
         }
 
+#if __ANDROID__
+        public CouchbaseLiteHttpClient GetHttpClient(CookieStore cookieStore, IRetryStrategy retryStrategy, bool allowSelfSigned)
+#else
         public CouchbaseLiteHttpClient GetHttpClient(CookieStore cookieStore, IRetryStrategy retryStrategy)
+#endif
         {
+#if __ANDROID__
+            var authHandler = BuildHandlerPipeline(cookieStore, retryStrategy, allowSelfSigned);
+#else
             var authHandler = BuildHandlerPipeline(cookieStore, retryStrategy);
+#endif
 
             // As the handler will not be shared, client.Dispose() needs to be 
             // called once the operation is done to release the unmanaged resources 

@@ -69,6 +69,7 @@ namespace Couchbase.Lite.Listener
                 DocumentContentOptions options = context.ContentOptions;
                 string openRevsParam = context.GetQueryParam("open_revs");
                 bool mustSendJson = context.ExplicitlyAcceptsType("application/json");
+                Status status = new Status();
                 if (openRevsParam == null || isLocalDoc) {
                     //Regular GET:
                     var revId = context.GetQueryParam("rev").AsRevID(); //often null
@@ -83,20 +84,15 @@ namespace Couchbase.Lite.Listener
                             options &= ~DocumentContentOptions.IncludeAttachments;
                         }
 
-                        Status status = new Status();
+                        
                         rev = db.GetDocument(docId, revId, true, status);
                         if(rev != null) {
                             rev = ApplyOptions(options, rev, context, db, status);
-                        }
+                        } 
 
                         if(rev == null) {
-                            if(status.Code == StatusCode.Deleted) {
-                                response.StatusReason = "deleted";
-                            } else {
-                                response.StatusReason = "missing";
-                            }
-
-                            response.InternalStatus = status.Code;
+                            response.StatusReason = status.Code == StatusCode.Deleted ? "deleted" : "missing";
+                            response.InternalStatus = StatusCode.NotFound;
                             return response;
                         }
                     }
@@ -141,8 +137,7 @@ namespace Couchbase.Lite.Listener
                             if(!includeDeleted && rev.Deleted) {
                                 continue;
                             }
-
-                            Status status = new Status();
+                            
                             var loadedRev = db.RevisionByLoadingBody(rev, status);
                             if(loadedRev != null) {
                                 ApplyOptions(options, loadedRev, context, db, status);
@@ -172,8 +167,7 @@ namespace Couchbase.Lite.Listener
                                 response.InternalStatus = StatusCode.BadId;
                                 return response;
                             }
-
-                            Status status = new Status();
+                            
                             var rev = db.GetDocument(docId, revID.AsRevID(), true);
                             if(rev != null) {
                                 rev = ApplyOptions(options, rev, context, db, status);
@@ -213,6 +207,8 @@ namespace Couchbase.Lite.Listener
             {
                 var response = context.CreateResponse();
                 string docId = context.DocumentName;
+
+                db.ForgetDesignDocument(context.DesignDocName);
                 if(context.GetQueryParam<bool>("new_edits", bool.TryParse, true)) {
                     // Regular PUT:
                     return UpdateDb(context, db, docId, body, false);

@@ -177,6 +177,15 @@ namespace Couchbase.Lite
         /// </summary>
         public bool AllNew { get; set; }
 
+#if __ANDROID__
+        /// <summary>
+        /// *DO NOT USE FOR PRODUCTION* (Android-only) sets up a replication to ignore SSL verification
+        /// so that a self signed certificate may be used for TLS.
+        /// </summary>
+        public bool AllowSelfSigned { get; set; }
+
+#endif
+
         #endregion
 
         #region Constructors

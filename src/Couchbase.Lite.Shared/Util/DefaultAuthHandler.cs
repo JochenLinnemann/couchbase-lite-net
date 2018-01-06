@@ -123,8 +123,14 @@ namespace Couchbase.Lite.Replicator
                 if(CookieParser.TryParse(response.Headers.GetValues("Set-Cookie").ElementAt(0), response.RequestMessage.RequestUri.Host,
                     out cookie)) {
                     lock (_locker) {
-                        _cookieStore.Add(cookie);
-                        _cookieStore.Save();
+                        try {
+                            _cookieStore.Add(cookie);
+                        } catch (CookieException e) {
+                            var headerValue = new SecureLogString(response.Headers.GetValues("Set-Cookie").ElementAt(0),
+                                LogMessageSensitivity.Insecure);
+                            Log.To.Sync.W("DefaultAuthHandler",
+                                $"Invalid cookie string received from remote: {headerValue}", e);
+                        }
                     }
                 }
             }
@@ -135,6 +141,11 @@ namespace Couchbase.Lite.Replicator
 
         protected override HttpRequestMessage ProcessRequest(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            lock (_locker) {
+                request.Headers.Remove("Cookie");
+                request.Headers.Add("Cookie", _cookieStore.GetCookieHeader(request.RequestUri));
+            }
+
             if(request.Content != null && !(request.Content is CompressedContent)) {
                 // This helps work around .NET 3.5's tendency to read from filestreams
                 // multiple times (the second time will be zero length since the filestream

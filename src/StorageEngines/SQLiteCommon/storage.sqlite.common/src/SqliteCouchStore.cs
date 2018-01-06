@@ -431,19 +431,102 @@ namespace Couchbase.Lite.Storage.SQLCipher
             return Utility.JoinQuoted(strings);
         }
 
-        private int PruneDocument(long docNumericID, int minGenToKeep)
+        private void PurgeSequences(IEnumerable<long> seqsToPurge)
         {
-            const string sql = "DELETE FROM revs WHERE doc_id=? AND revid < ? AND current=0 AND" +
-                "sequence NOT IN (SELECT parent FROM revs WHERE doc_id=? AND current=1)";
-            var minGen = String.Format("{0}-", minGenToKeep);
-            try {
-                var retVal = StorageEngine?.ExecSQL(sql, docNumericID, minGen, docNumericID);
-                return retVal.HasValue ? retVal.Value : 0;
-            } catch(Exception) {
-                Log.To.Database.W(TAG, "SQLite error {0} pruning generations < {1} of doc {2}", StorageEngine?.LastErrorCode, minGenToKeep, docNumericID);
+            if (seqsToPurge?.Any() != true) {
+                return;
             }
 
-            return 0;
+            var count = seqsToPurge.Count();
+            var seqsString = Utility.JoinQuoted(seqsToPurge.Select(x => x.ToString()));
+            Log.To.Database.V(TAG, $"    purging {count} sequences: {seqsString}");
+            var sql = $"DELETE FROM revs WHERE sequence in ({seqsString})";
+            var purged = StorageEngine?.ExecSQL(sql);
+            if (purged != count) {
+                Log.To.Database.W(TAG, $"PurgeRevisions: Only {purged} sequences deleted of ({seqsString})");
+            }
+        }
+
+        private int PruneDocument(string docID, long docNumericID, int minGenToKeep)
+        {
+            // First find the leaves
+            var leaves = new HashSet<long>();
+            try {
+                using (var c = StorageEngine?.RawQuery("SELECT sequence FROM revs WHERE doc_id=? AND current",
+                    docNumericID)) {
+                    if (c == null) {
+                        return 0;
+                    }
+
+                    while (c.MoveToNext()) {
+                        var seq = c.GetLong(0);
+                        leaves.Add(seq);
+                    }
+                }
+            } catch (Exception) {
+                Log.To.Database.W(TAG, "(1) SQLite error {0} pruning generations < {1} of doc {2}",
+                    StorageEngine?.LastErrorCode, minGenToKeep, docNumericID);
+            }
+
+            if (leaves.Count <= 1) {
+                // There are no branches, so just delete everything below minGenToKeep:
+                try {
+                    var retVal = StorageEngine?.ExecSQL("DELETE FROM revs WHERE doc_id=? AND revid < ? AND current=0",
+                        docNumericID, $"{minGenToKeep}-");
+                    Log.To.Database.V(TAG, $"    pruned {retVal} revs with gen<{minGenToKeep} from {docNumericID}");
+                    return retVal ?? 0;
+                } catch (Exception) {
+                    Log.To.Database.W(TAG, "(2) SQLite error {0} pruning generations < {1} of doc {2}",
+                        StorageEngine?.LastErrorCode, minGenToKeep, docNumericID);
+                }
+            } else {
+                // Doc has branches.  Keep the ancestors of all the leaves, down to _maxRevTreeDepth.
+                // First fetch the skeleton of the rev tree:
+                var revs = new Dictionary<long, long>();
+                try {
+                    using (var c = StorageEngine?.RawQuery("SELECT sequence, parent FROM revs WHERE doc_id=?",
+                        docNumericID)) {
+                        if (c == null) {
+                            return 0;
+                        }
+
+                        while (c.MoveToNext()) {
+                            var seq = c.GetLong(0);
+                            var parent = c.GetLong(1);
+                            revs[seq] = parent;
+                        }
+                    }
+                } catch (Exception) {
+                    Log.To.Database.W(TAG, "(3) SQLite error {0} pruning generations < {1} of doc {2}",
+                        StorageEngine?.LastErrorCode, minGenToKeep, docNumericID);
+                }
+
+                // Now remove each leaf and its ancestors from `revs`:
+                var secureDocID = new SecureLogString(docID, LogMessageSensitivity.PotentiallyInsecure);
+                Log.To.Database.V(TAG, $"    pruning {secureDocID}, scanning {revs.Count} revs in tree...");
+                foreach (var leaf in leaves) {
+                    var seq = leaf;
+                    for (int i = 0; i < MaxRevTreeDepth; i++) {
+                        if (!revs.ContainsKey(seq)) {
+                            break;
+                        }
+
+                        var parent = revs[seq];
+                        revs.Remove(seq);
+                        if (parent == 0) {
+                            break;
+                        }
+
+                        seq = parent;
+                    }
+                }
+
+                // The remainined keys in `revs` are sequences to purge:
+                PurgeSequences(revs.Keys);
+                return revs.Count;
+            }
+
+            return -1;
         }
 
         private void Open()
@@ -571,7 +654,7 @@ namespace Couchbase.Lite.Storage.SQLCipher
                 RunInTransaction(() =>
                 {
                     foreach (var pair in toPrune) {
-                        outPruned += PruneDocument(pair.Key, pair.Value);
+                        outPruned += PruneDocument("?", pair.Key, pair.Value);
                     }
 
                     return true;
@@ -1083,7 +1166,7 @@ namespace Couchbase.Lite.Storage.SQLCipher
             if (revId != null) {
                 sb.Append(" FROM revs WHERE revs.doc_id=? AND revid=? LIMIT 1");
             } else {
-                sb.Append(" FROM revs WHERE revs.doc_id=? and current=1 ORDER BY deleted, revid DESC LIMIT 1");
+                sb.Append(" FROM revs WHERE revs.doc_id=? and current=1 ORDER BY deleted ASC, revid DESC LIMIT 1");
             }
                 
             var transactionStatus = TryQuery(c =>
@@ -1094,14 +1177,16 @@ namespace Couchbase.Lite.Storage.SQLCipher
                 }
 
                 bool deleted = c.GetInt(1) != 0;
-                result = new RevisionInternal(docId, revIDToUse, deleted);
-                result.Sequence = c.GetLong(2);
-                if(withBody) {
-                    result.SetJson(c.GetBlob(3));
-                } else {
-                    result.Missing = c.GetInt(3) == 0;
+                if (revId != null || !deleted) {
+                    result = new RevisionInternal(docId, revIDToUse, deleted);
+                    result.Sequence = c.GetLong(2);
+                    if (withBody) {
+                        result.SetJson(c.GetBlob(3));
+                    } else {
+                        result.Missing = c.GetInt(3) == 0;
+                    }
                 }
-                    
+
                 return revId == null && deleted;
             }, sb.ToString(), docNumericId, revId?.ToString());
 
@@ -1115,12 +1200,7 @@ namespace Couchbase.Lite.Storage.SQLCipher
                 }
             }
 
-            if(result.Deleted) {
-                outStatus.Code = StatusCode.Deleted;
-                return null;
-            } else {
-                outStatus.Code = StatusCode.Ok;
-            }
+            outStatus.Code = result == null || result.Deleted ? StatusCode.Deleted : StatusCode.Ok;
 
             return result;
         }
@@ -1306,7 +1386,8 @@ namespace Couchbase.Lite.Storage.SQLCipher
             return GetAllDocumentRevisions(docId, docNumericId, onlyCurrent, includeDeleted);
         }
 
-        public IEnumerable<RevisionID> GetPossibleAncestors(RevisionInternal rev, int limit, ValueTypePtr<bool> haveBodies)
+        public IEnumerable<RevisionID> GetPossibleAncestors(RevisionInternal rev, int limit, ValueTypePtr<bool> haveBodies,
+            bool withBodiesOnly)
         {
             int generation = rev.Generation;
             if (generation <= 1L) {
@@ -1320,26 +1401,47 @@ namespace Couchbase.Lite.Storage.SQLCipher
 
             int sqlLimit = limit > 0 ? limit : -1;
             haveBodies.Value = true;
-            const string sql = "SELECT revid, json is not null FROM revs " +
-                "WHERE doc_id=? AND current=? AND revid < ? " +
-                "ORDER BY revid DESC LIMIT ?";
+            string sql;
+            if (withBodiesOnly) {
+                sql = "SELECT revid, json is not null, json FROM revs " +
+                      "WHERE doc_id=? AND current=? AND revid < ? " +
+                      "ORDER BY revid DESC LIMIT ?";
+            } else {
+                sql = "SELECT revid, json is not null FROM revs " +
+                                   "WHERE doc_id=? AND current=? AND revid < ? " +
+                                   "ORDER BY revid DESC LIMIT ?";
+            }
 
             // First look only for current revisions; if none match, go to non-current ones.
             var revIDs = new List<RevisionID>();
             for(int current = 1; current >= 0; current--) {
                 var status = TryQuery(c =>
                 {
-                    revIDs.Add(c.GetString(0).AsRevID());
-                    if(haveBodies && c.GetInt(1) == 0) {
-                        haveBodies.Value = false;
+                    if (c.GetInt(1) == 0) {
+                        if (haveBodies) {
+                            haveBodies.Value = false;
+                        }
+
+                        if (withBodiesOnly) {
+                            return true;
+                        }
+                    } else if(withBodiesOnly) {
+                        var body = Manager.GetObjectMapper().ReadValue<IDictionary<string, object>>(c.GetBlob(2));
+                        if (body.ContainsKey("_removed")) {
+                            return true; // Skip _removed
+                        }
                     }
+                    revIDs.Add(c.GetString(0).AsRevID());
+                    
 
                     return true;
-                }, sql, docNumericId, current, String.Format("{0}-", generation), sqlLimit);
+                }, sql, docNumericId, current, $"{generation}-", sqlLimit);
 
                 if(status.Code != StatusCode.NotFound && status.IsError) {
                     return null;
-                } else if(revIDs.Count > 0) {
+                }
+
+                if (revIDs.Count > 0) {
                     return revIDs;
                 }
             }
@@ -1898,7 +2000,7 @@ namespace Couchbase.Lite.Storage.SQLCipher
                 // Delete the deepest revs in the tree to enforce the MaxRevTreeDepth:
                 var minGenToKeep = newRev.Generation - MaxRevTreeDepth + 1;
                 if(minGenToKeep > 1) {
-                    var pruned = PruneDocument(docNumericId, minGenToKeep);
+                    var pruned = PruneDocument(docId, docNumericId, minGenToKeep);
                     if(pruned > 0) {
                         Log.To.Database.V(TAG, "Pruned {0} old revisions of doc '{1}'", pruned,
                             new SecureLogString(docId, LogMessageSensitivity.PotentiallyInsecure));
@@ -2099,7 +2201,7 @@ namespace Couchbase.Lite.Storage.SQLCipher
 
                     var minGenToKeep = maxGen - MaxRevTreeDepth + 1;
                     if (minGen < minGenToKeep) {
-                        var pruned = PruneDocument(docNumericId, minGenToKeep);
+                        var pruned = PruneDocument(docId, docNumericId, minGenToKeep);
                         if (pruned > 0) {
                             Log.To.Database.V(TAG, "Pruned {0} old revisions of '{1}'", pruned,
                                 new SecureLogString(docId, LogMessageSensitivity.PotentiallyInsecure));

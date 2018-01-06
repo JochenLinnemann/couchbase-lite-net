@@ -34,6 +34,10 @@ using Couchbase.Lite.Auth;
 using Couchbase.Lite.Support;
 using Couchbase.Lite.Util;
 
+#if NET_3_5
+using Cookie = System.Net.Couchbase.Cookie;
+#endif
+
 namespace Couchbase.Lite.Internal
 {
     internal sealed class RemoteSessionContructorOptions : ConstructorOptions
@@ -119,7 +123,11 @@ namespace Couchbase.Lite.Internal
             _remoteRequestCancellationSource?.Cancel();
             _remoteRequestCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(_cancellationTokenSource.Token);
             ClientFactory.SocketTimeout = options.SocketTimeout;
+#if __ANDROID__
+            var clientObj = ClientFactory.GetHttpClient(CookieStore, options.RetryStrategy, options.AllowSelfSigned);
+#else
             var clientObj = ClientFactory.GetHttpClient(CookieStore, options.RetryStrategy);
+#endif
             clientObj.Timeout = options.RequestTimeout;
             clientObj.SetConcurrencyLimit(options.MaxOpenHttpConnections);
             clientObj.Authenticator = Authenticator;
@@ -467,8 +475,29 @@ namespace Couchbase.Lite.Internal
 
         private void AddRequestHeaders(HttpRequestMessage request)
         {
-            foreach(string requestHeaderKey in RequestHeaders.Keys) {
-                request.Headers.Add(requestHeaderKey, RequestHeaders.Get(requestHeaderKey).ToString());
+            
+            foreach(var requestHeaderKey in RequestHeaders.Keys) {
+                if (requestHeaderKey.ToLowerInvariant() == "cookie") {
+                    Cookie cookie;
+                    var cookieStr = RequestHeaders[requestHeaderKey];
+                    if (!CookieParser.TryParse(cookieStr, request.RequestUri.Host, out cookie)) {
+                        Log.To.Sync.W(Tag, "Invalid cookie string received, {0}",
+                            new SecureLogString(cookieStr, LogMessageSensitivity.Insecure));
+                    } else {
+                        try {
+                            CookieStore.Add(cookie);
+                        } catch (CookieException e) {
+                            var headerValue = new SecureLogString(cookieStr, LogMessageSensitivity.Insecure);
+                            Log.To.Sync.W(Tag, $"Invalid cookie string received, {headerValue}", e);
+                        }
+                    }
+
+                    request.Headers.Add("Cookie", CookieStore.GetCookieHeader(request.RequestUri));
+                    continue;
+                }
+
+
+                request.Headers.Add(requestHeaderKey, RequestHeaders.Get(requestHeaderKey));
             }
         }
 
