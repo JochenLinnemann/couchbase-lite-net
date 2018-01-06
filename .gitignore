@@ -161,3 +161,4 @@ sync_gateway
 staging
 AboutResources.txt
 AboutAssets.txt
+/src/.vs
