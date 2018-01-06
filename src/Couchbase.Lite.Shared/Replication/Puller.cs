@@ -164,13 +164,7 @@ namespace Couchbase.Lite.Replicator
             _changeTracker.Continuous = Continuous;
             _changeTracker.PollInterval = pollInterval;
             _changeTracker.Heartbeat = ReplicationOptions.Heartbeat;
-            if(DocIds != null) {
-                if(ServerType != null && ServerType.Name == "CouchDB") {
-                    _changeTracker.DocIDs = DocIds.ToList();
-                } else {
-                    Log.To.Sync.W(TAG, "DocIds parameter only supported on CouchDB");
-                }
-            }       
+            _changeTracker.DocIDs = DocIds?.ToList();
 
             if (Filter != null) {
                 _changeTracker.FilterName = Filter;
@@ -384,13 +378,12 @@ namespace Couchbase.Lite.Replicator
 
             dl.Complete += (sender, args) =>
             {
-                if(args != null && args.Error != null) {
+                if(args?.Error != null) {
                     RevisionFailed();
-                    if(remainingRevs.Count == 0) {
-                        LastError = args.Error;
-                    }
+                    LastError = args.Error;
+                }
 
-                } else if(remainingRevs.Count > 0) {
+                if (remainingRevs.Count > 0) {
                     Log.To.Sync.W(TAG, "{0} revs not returned from _bulk_get: {1}",
                         remainingRevs.Count, remainingRevs);
                     for(int i = 0; i < remainingRevs.Count; i++) {
@@ -398,15 +391,12 @@ namespace Couchbase.Lite.Replicator
                         if(ShouldRetryDownload(rev.DocID)) {
                             _bulkRevsToPull.Add(remainingRevs[i]);
                         } else {
-                            LastError = args.Error;
                             SafeIncrementCompletedChangesCount();
                         }
                     }
                 }
-
-                SafeAddToCompletedChangesCount(remainingRevs.Count);
+                
                 LastSequence = _pendingSequences.GetCheckpointedValue();
-
                 PullRemoteRevisions();
             };
 
@@ -576,7 +566,7 @@ namespace Couchbase.Lite.Replicator
             var knownRevs = default(IList<RevisionID>);
             ValueTypePtr<bool> haveBodies = false;
             try {
-                knownRevs = LocalDatabase.Storage.GetPossibleAncestors(rev, MaxAttsSince, haveBodies)?.ToList();
+                knownRevs = LocalDatabase.Storage.GetPossibleAncestors(rev, MaxAttsSince, haveBodies, true)?.ToList();
             } catch(Exception e) {
                 Log.To.Sync.W(TAG, "Error getting possible ancestors (probably database closed)", e);
             }

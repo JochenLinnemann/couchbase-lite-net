@@ -76,7 +76,11 @@ namespace Couchbase.Lite.Tests
             HttpHandler = new FailEveryRequestHandler();
         }
 
+#if __ANDROID__
+        public CouchbaseLiteHttpClient GetHttpClient(CookieStore cookieStore, IRetryStrategy strategy, bool allowSelfSigned)
+#else
         public CouchbaseLiteHttpClient GetHttpClient(CookieStore cookieStore, IRetryStrategy strategy)
+#endif
         {
             var mockHttpClient = new HttpClient(HttpHandler);
             return new CouchbaseLiteHttpClient(mockHttpClient, null);

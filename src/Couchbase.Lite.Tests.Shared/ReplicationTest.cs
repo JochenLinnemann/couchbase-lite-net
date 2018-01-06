@@ -243,6 +243,24 @@ namespace Couchbase.Lite
         }
 
         [Test]
+        public void TestFailedRevisionDuringOneShotPull()
+        {
+            using (var remoteDb = _sg.CreateDatabase(TempDbName())) {
+                var factory = new MockHttpClientFactory(false);
+                factory.HttpHandler.SetResponder("_bulk_get", (request) =>
+                {
+                    throw new TaskCanceledException();
+                });
+
+                manager.DefaultHttpClientFactory = factory;
+                remoteDb.AddDocuments(50, false);
+                var pull = database.CreatePullReplication(remoteDb.RemoteUri);
+                RunReplication(pull);
+                pull.LastError.Should().BeOfType<TaskCanceledException>();
+            }
+        }
+
+        [Test]
         public void TestRejectedDocument()
         {
             var push = database.CreatePushReplication(GetReplicationURL());
@@ -1967,6 +1985,25 @@ namespace Couchbase.Lite
             }
         }
 
+        [Test]
+        public void TestPullFilteredByDocId()
+        {
+            if (!Boolean.Parse((string) GetProperty("replicationTestsEnabled"))) {
+                Assert.Inconclusive("Replication tests disabled.");
+                return;
+            }
+
+            using (var remoteDb = _sg.CreateDatabase(TempDbName())) {
+                var added = remoteDb.AddDocuments(50, false);
+                var docId = added.First();
+                var pull = database.CreatePullReplication(remoteDb.RemoteUri);
+                pull.DocIds = new[] {docId};
+                RunReplication(pull);
+                database.GetDocumentCount().Should().Be(1);
+                database.GetExistingDocument(docId).Should().NotBeNull();
+            }
+        }
+
         /**
         * Verify that running a continuous push replication will emit a change while
         * in an error state when run against a mock server that returns 500 Internal Server
@@ -3082,6 +3119,47 @@ namespace Couchbase.Lite
                     Assert.AreEqual(numDocs, repl.ChangesCount);
                     Assert.AreEqual(numDocs, repl.CompletedChangesCount);
                     Assert.AreEqual(0, database.GetDocumentCount());
+                }
+            }
+        }
+
+        [Category("issue/842")]
+        [Test]
+        public void TestSetCookieInHeader()
+        {
+            if(!Boolean.Parse((string)GetProperty("replicationTestsEnabled")))
+            {
+                Assert.Inconclusive("Replication tests disabled.");
+                return;
+            }
+
+            using (var remoteDb = _sg.CreateDatabase(TempDbName())) {
+                for (int i = 0; i < 2; i++) {
+                    remoteDb.DisableGuestAccess();
+                    var cookie = _sg.GenerateSessionCookie(remoteDb.Name, "jim", "borden", TimeSpan.FromSeconds(5));
+                    var cookieStr = $"{cookie["cookie_name"]}={cookie["session_id"]}";
+                    var repl = database.CreatePushReplication(remoteDb.RemoteUri);
+                    repl.Continuous = true;
+                    repl.Headers["Cookie"] = cookieStr;
+                    RunReplication(repl);
+                    Assert.IsNull(repl.LastError);
+
+                    // Sleep for more than 10% of the TTL to trigger auto session refresh
+                    // by SGW:
+                    Sleep(1000);
+
+                    // Create a document to push to SGW:
+                    CreateDocumentWithProperties(database, new Dictionary<string, object> {["foo"] = "bar"});
+                    int count = 0;
+                    while (repl.CompletedChangesCount < 1) {
+                        Sleep(500);
+                        if (count++ > 5) {
+                            Assert.Fail("Replication timed out");
+                        }
+                    }
+
+                    StopReplication(repl);
+                    _sg.DeleteSessionCookie(remoteDb.Name, "jim");
                 }
             }
         }
